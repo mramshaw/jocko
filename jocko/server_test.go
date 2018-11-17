@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	stdlog "log"
-
 	"github.com/Shopify/sarama"
 	cluster "github.com/bsm/sarama-cluster"
 	"github.com/hashicorp/consul/testutil/retry"
@@ -16,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/travisjeffery/jocko/jocko"
 	"github.com/travisjeffery/jocko/jocko/config"
+	"github.com/travisjeffery/jocko/log"
 	"github.com/travisjeffery/jocko/protocol"
 )
 
@@ -24,40 +23,43 @@ const (
 )
 
 func init() {
-	sarama.Logger = stdlog.New(os.Stdout, "[Sarama] ", stdlog.LstdFlags)
+	log.SetLevel("debug")
 }
 
 func TestProduceConsume(t *testing.T) {
-	s1, teardown1 := jocko.NewTestServer(t, func(cfg *config.BrokerConfig) {
-		cfg.BootstrapExpect = 3
+	sarama.Logger = log.NewStdLogger(log.New(log.DebugLevel, "server_test: sarama: "))
+
+	s1, dir1 := jocko.NewTestServer(t, func(cfg *config.Config) {
 		cfg.Bootstrap = true
 	}, nil)
 	ctx1, cancel1 := context.WithCancel((context.Background()))
 	defer cancel1()
 	err := s1.Start(ctx1)
 	require.NoError(t, err)
-	defer teardown1()
+	defer os.RemoveAll(dir1)
 	// TODO: mv close into teardown
 	defer s1.Shutdown()
 
-	s2, teardown2 := jocko.NewTestServer(t, func(cfg *config.BrokerConfig) {
+	jocko.WaitForLeader(t, s1)
+
+	s2, dir2 := jocko.NewTestServer(t, func(cfg *config.Config) {
 		cfg.Bootstrap = false
 	}, nil)
 	ctx2, cancel2 := context.WithCancel((context.Background()))
 	defer cancel2()
 	err = s2.Start(ctx2)
 	require.NoError(t, err)
-	defer teardown2()
+	defer os.RemoveAll(dir2)
 	defer s2.Shutdown()
 
-	s3, teardown3 := jocko.NewTestServer(t, func(cfg *config.BrokerConfig) {
+	s3, dir3 := jocko.NewTestServer(t, func(cfg *config.Config) {
 		cfg.Bootstrap = false
 	}, nil)
 	ctx3, cancel3 := context.WithCancel((context.Background()))
 	defer cancel3()
 	err = s3.Start(ctx3)
 	require.NoError(t, err)
-	defer teardown3()
+	defer os.RemoveAll(dir3)
 	defer s3.Shutdown()
 
 	jocko.TestJoin(t, s1, s2, s3)
@@ -128,6 +130,7 @@ func TestProduceConsume(t *testing.T) {
 	case s3:
 		cancel3()
 	}
+	controller.Leave()
 	controller.Shutdown()
 
 	time.Sleep(3 * time.Second)
@@ -170,36 +173,37 @@ func TestProduceConsume(t *testing.T) {
 func TestConsumerGroup(t *testing.T) {
 	t.Skip()
 
-	s1, teardown1 := jocko.NewTestServer(t, func(cfg *config.BrokerConfig) {
-		cfg.BootstrapExpect = 3
+	s1, dir1 := jocko.NewTestServer(t, func(cfg *config.Config) {
 		cfg.Bootstrap = true
 	}, nil)
 	ctx1, cancel1 := context.WithCancel((context.Background()))
 	defer cancel1()
 	err := s1.Start(ctx1)
 	require.NoError(t, err)
-	defer teardown1()
-	// TODO: mv close into teardown
+	defer os.RemoveAll(dir1)
+	// TODO: mv close into dir
 	defer s1.Shutdown()
 
-	s2, teardown2 := jocko.NewTestServer(t, func(cfg *config.BrokerConfig) {
+	jocko.WaitForLeader(t, s1)
+
+	s2, dir2 := jocko.NewTestServer(t, func(cfg *config.Config) {
 		cfg.Bootstrap = false
 	}, nil)
 	ctx2, cancel2 := context.WithCancel((context.Background()))
 	defer cancel2()
 	err = s2.Start(ctx2)
 	require.NoError(t, err)
-	defer teardown2()
+	defer os.RemoveAll(dir2)
 	defer s2.Shutdown()
 
-	s3, teardown3 := jocko.NewTestServer(t, func(cfg *config.BrokerConfig) {
+	s3, dir3 := jocko.NewTestServer(t, func(cfg *config.Config) {
 		cfg.Bootstrap = false
 	}, nil)
 	ctx3, cancel3 := context.WithCancel((context.Background()))
 	defer cancel3()
 	err = s3.Start(ctx3)
 	require.NoError(t, err)
-	defer teardown3()
+	defer os.RemoveAll(dir3)
 	defer s3.Shutdown()
 
 	jocko.TestJoin(t, s1, s2, s3)
@@ -316,12 +320,12 @@ func TestConsumerGroup(t *testing.T) {
 func BenchmarkServer(b *testing.B) {
 	ctx, cancel := context.WithCancel((context.Background()))
 	defer cancel()
-	srv, teardown := jocko.NewTestServer(b, func(cfg *config.BrokerConfig) {
+	srv, dir := jocko.NewTestServer(b, func(cfg *config.Config) {
 		cfg.Bootstrap = true
 		cfg.BootstrapExpect = 1
 		cfg.StartAsLeader = true
 	}, nil)
-	defer teardown()
+	defer os.RemoveAll(dir)
 	err := srv.Start(ctx)
 	require.NoError(b, err)
 
@@ -390,6 +394,7 @@ func createTopic(t ti.T, s1 *jocko.Server, other ...*jocko.Server) error {
 		assignment = append(assignment, o.ID())
 	}
 	_, err = conn.CreateTopics(&protocol.CreateTopicRequests{
+		Timeout: 15 * time.Second,
 		Requests: []*protocol.CreateTopicRequest{{
 			Topic:             topic,
 			NumPartitions:     int32(1),

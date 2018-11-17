@@ -1,5 +1,7 @@
 package protocol
 
+import "fmt"
+
 type RequestHeader struct {
 	// Size of the request
 	Size int32
@@ -44,4 +46,14 @@ func (r *RequestHeader) Decode(d PacketDecoder) error {
 	}
 	r.ClientID, err = d.String()
 	return err
+}
+
+func (r *RequestHeader) String() string {
+	return fmt.Sprintf(
+		"correlation id: %d, api key: %d, client: %s, size: %d",
+		r.CorrelationID,
+		r.APIKey,
+		r.ClientID,
+		r.Size,
+	)
 }

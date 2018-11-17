@@ -1,7 +1,7 @@
 package commitlog
 
 import (
-	"fmt"
+	"io/ioutil"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -11,7 +11,10 @@ import (
 )
 
 func TestIndex(t *testing.T) {
-	path := filepath.Join(os.TempDir(), fmt.Sprintf(fileFormat, rand.Int63(), indexSuffix))
+	dir, err := ioutil.TempDir("", "commitlog-index")
+	require.NoError(t, err)
+	path := filepath.Join(dir, "test.index")
+
 	totalEntries := rand.Intn(10) + 10
 	//case for roundDown
 	bytes := int64(totalEntries*entryWidth + 1)
@@ -72,7 +75,10 @@ func TestIndex(t *testing.T) {
 }
 
 func TestIndexScanner(t *testing.T) {
-	path := filepath.Join(os.TempDir(), fmt.Sprintf(fileFormat, rand.Int63(), indexSuffix))
+	dir, err := ioutil.TempDir("", "commitlog-index")
+	require.NoError(t, err)
+	path := filepath.Join(dir, "test.index")
+
 	totalEntries := rand.Intn(10) + 10
 	//case for roundDown
 	bytes := int64(totalEntries*entryWidth + 1)

@@ -63,3 +63,5 @@ func (r *LeaderAndISRResponse) Key() int16 {
 func (r *LeaderAndISRResponse) Version() int16 {
 	return r.APIVersion
 }
+
+type LeaderAndISRPartitions []*LeaderAndISRPartition

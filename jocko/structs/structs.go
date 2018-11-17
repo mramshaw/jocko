@@ -124,6 +124,10 @@ type Topic struct {
 	Topic string
 	// Partitions is a map of partition IDs to slice of replicas IDs.
 	Partitions map[int32][]int32
+	// Config
+	Config TopicConfig
+	// Internal, e.g. group metadata topic
+	Internal bool
 
 	RaftIndex
 }
@@ -156,13 +160,25 @@ type Member struct {
 	Assignment []byte
 }
 
+type GroupState int32
+
+const (
+	GroupStatePreparingRebalance  GroupState = 0
+	GroupStateCompletingRebalance GroupState = 1
+	GroupStateStable              GroupState = 2
+	GroupStateDead                GroupState = 3
+	GroupStateEmpty               GroupState = 4
+)
+
 // Group
 type Group struct {
-	ID          string
-	Group       string
-	Coordinator int32
-	LeaderID    string
-	Members     map[string]Member
+	ID           string
+	Group        string
+	Coordinator  int32
+	LeaderID     string
+	Members      map[string]Member
+	State        GroupState
+	GenerationID int32
 
 	RaftIndex
 }

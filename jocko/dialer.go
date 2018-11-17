@@ -3,6 +3,8 @@ package jocko
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
+	"io"
 	"math"
 	"net"
 	"time"
@@ -36,6 +38,8 @@ type Dialer struct {
 	TLS *tls.Config
 	// DualStack enables RFC 6555-compliant "happy eyeballs" dialing.
 	DualStack bool
+	// SASL enables SASL plain authentication.
+	SASL *SASL
 }
 
 var (
@@ -85,7 +89,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (*Con
 	return NewConn(c, d.ClientID)
 }
 
-func (d *Dialer) dialContext(ctx context.Context, network, address string) (net.Conn, error) {
+func (d *Dialer) dialContext(ctx context.Context, network, address string) (conn net.Conn, err error) {
 	if r := d.Resolver; r != nil {
 		host, port := splitHostPort(address)
 		addrs, err := r.LookupHost(ctx, host)
@@ -100,11 +104,66 @@ func (d *Dialer) dialContext(ctx context.Context, network, address string) (net.
 			address = net.JoinHostPort(address, port)
 		}
 	}
-	return (&net.Dialer{
+	conn, err = (&net.Dialer{
 		LocalAddr:     d.LocalAddr,
 		FallbackDelay: d.FallbackDelay,
 		KeepAlive:     d.KeepAlive,
 	}).DialContext(ctx, network, address)
+	if err != nil {
+		return
+	}
+
+	if d.TLS != nil {
+		conn, err = d.connectTLS(ctx, conn)
+		if err != nil {
+			return
+		}
+	}
+
+	if d.SASL != nil {
+		if err = d.connectSASLPlain(ctx, conn); err != nil {
+			conn.Close()
+			return
+		}
+	}
+
+	return conn, nil
+}
+
+// TODO: add unit tests
+func (d *Dialer) connectTLS(ctx context.Context, conn net.Conn) (tlsConn *tls.Conn, err error) {
+	tlsConn = tls.Client(conn, d.TLS)
+	errc := make(chan error)
+	go func() {
+		defer close(errc)
+		errc <- tlsConn.Handshake()
+	}()
+	select {
+	case <-ctx.Done():
+		conn.Close()
+		tlsConn.Close()
+		<-errc
+		err = ctx.Err()
+	case err = <-errc:
+	}
+	return
+}
+
+func (d *Dialer) connectSASLPlain(ctx context.Context, conn net.Conn) error {
+	length := 1 + len(d.SASL.User) + 1 + len(d.SASL.Pass)
+	msg := make([]byte, length+4) //4 byte length header + auth data
+	binary.BigEndian.PutUint32(msg, uint32(length))
+	copy(msg[4:], []byte("\x00"+d.SASL.User+"\x00"+d.SASL.Pass))
+	_, err := conn.Write(msg)
+	if err != nil {
+		return err
+	}
+	header := make([]byte, 4)
+	_, err = io.ReadFull(conn, header)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func splitHostPort(s string) (string, string) {
@@ -119,4 +178,8 @@ func splitHostPort(s string) (string, string) {
 type Resolver interface {
 	// LookupHost looks up the given host using the local resolver.
 	LookupHost(ctx context.Context, host string) ([]string, error)
+}
+
+type SASL struct {
+	User, Pass string
 }

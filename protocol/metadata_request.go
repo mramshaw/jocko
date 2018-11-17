@@ -37,3 +37,5 @@ func (r *MetadataRequest) Key() int16 {
 func (r *MetadataRequest) Version() int16 {
 	return r.APIVersion
 }
+
+type Strings []string

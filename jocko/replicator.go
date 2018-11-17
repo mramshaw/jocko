@@ -1,13 +1,16 @@
 package jocko
 
 import (
+	"time"
+
+	"github.com/cenkalti/backoff"
 	"github.com/travisjeffery/jocko/log"
 	"github.com/travisjeffery/jocko/protocol"
 )
 
 // Client is used to request other brokers.
 type client interface {
-	Fetch(fetchRequest *protocol.FetchRequest) (*protocol.FetchResponses, error)
+	Fetch(fetchRequest *protocol.FetchRequest) (*protocol.FetchResponse, error)
 	CreateTopics(createRequest *protocol.CreateTopicRequests) (*protocol.CreateTopicsResponse, error)
 	LeaderAndISR(request *protocol.LeaderAndISRRequest) (*protocol.LeaderAndISRResponse, error)
 	// others
@@ -16,32 +19,34 @@ type client interface {
 // Replicator fetches from the partition's leader producing to itself the follower, thereby replicating the partition.
 type Replicator struct {
 	config              ReplicatorConfig
-	logger              log.Logger
 	replica             *Replica
-	minBytes            int32
-	fetchSize           int32
-	maxWaitTime         int32
 	highwaterMarkOffset int64
 	offset              int64
 	msgs                chan []byte
 	done                chan struct{}
 	leader              client
+	backoff             *backoff.ExponentialBackOff
 }
 
 type ReplicatorConfig struct {
-	MinBytes    int32
-	MaxWaitTime int32
+	MinBytes int32
+	// todo: make this a time.Duration
+	MaxWaitTime time.Duration
 }
 
 // NewReplicator returns a new replicator instance.
-func NewReplicator(config ReplicatorConfig, replica *Replica, leader client, logger log.Logger) *Replicator {
+func NewReplicator(config ReplicatorConfig, replica *Replica, leader client) *Replicator {
+	if config.MinBytes == 0 {
+		config.MinBytes = 1
+	}
+	bo := backoff.NewExponentialBackOff()
 	r := &Replicator{
 		config:  config,
-		logger:  logger,
 		replica: replica,
 		leader:  leader,
 		done:    make(chan struct{}, 2),
 		msgs:    make(chan []byte, 2),
+		backoff: bo,
 	}
 	return r
 }
@@ -53,15 +58,18 @@ func (r *Replicator) Replicate() {
 }
 
 func (r *Replicator) fetchMessages() {
+	var fetchRequest *protocol.FetchRequest
+	var fetchResponse *protocol.FetchResponse
+	var err error
 	for {
 		select {
 		case <-r.done:
 			return
 		default:
-			fetchRequest := &protocol.FetchRequest{
+			fetchRequest = &protocol.FetchRequest{
 				ReplicaID:   r.replica.BrokerID,
-				MaxWaitTime: r.maxWaitTime,
-				MinBytes:    r.minBytes,
+				MaxWaitTime: r.config.MaxWaitTime,
+				MinBytes:    r.config.MinBytes,
 				Topics: []*protocol.FetchTopic{{
 					Topic: r.replica.Partition.Topic,
 					Partitions: []*protocol.FetchPartition{{
@@ -70,21 +78,20 @@ func (r *Replicator) fetchMessages() {
 					}},
 				}},
 			}
-			fetchResponse, err := r.leader.Fetch(fetchRequest)
+			fetchResponse, err = r.leader.Fetch(fetchRequest)
 			// TODO: probably shouldn't panic. just let this replica fall out of ISR.
 			if err != nil {
-				r.logger.Error("failed to fetch messages", log.Error("error", err))
-				continue
+				log.Error.Printf("replicator: fetch messages error: %s", err)
+				goto BACKOFF
 			}
 			for _, resp := range fetchResponse.Responses {
 				for _, p := range resp.PartitionResponses {
 					if p.ErrorCode != protocol.ErrNone.Code() {
-						r.logger.Error("partition response error", log.Int16("error code", p.ErrorCode), log.Any("response", p))
-						continue
+						log.Error.Printf("replicator: partition response error: %d", p.ErrorCode)
+						goto BACKOFF
 					}
 					if p.RecordSet == nil {
-						// r.logger.Debug("replicator: fetch messages: record set is nil")
-						continue
+						goto BACKOFF
 					}
 					offset := int64(protocol.Encoding.Uint64(p.RecordSet[:8]))
 					if offset > r.offset {
@@ -94,6 +101,12 @@ func (r *Replicator) fetchMessages() {
 					}
 				}
 			}
+
+			r.backoff.Reset()
+			continue
+
+		BACKOFF:
+			time.Sleep(r.backoff.NextBackOff())
 		}
 	}
 }

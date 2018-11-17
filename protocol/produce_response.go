@@ -10,19 +10,19 @@ type ProducePartitionResponse struct {
 	LogStartOffset int64
 }
 
-type ProduceResponse struct {
+type ProduceTopicResponse struct {
 	Topic              string
 	PartitionResponses []*ProducePartitionResponse
 }
 
-type ProduceResponses struct {
+type ProduceResponse struct {
 	APIVersion int16
 
-	Responses    []*ProduceResponse
+	Responses    []*ProduceTopicResponse
 	ThrottleTime time.Duration
 }
 
-func (r *ProduceResponses) Encode(e PacketEncoder) (err error) {
+func (r *ProduceResponse) Encode(e PacketEncoder) (err error) {
 	if err = e.PutArrayLength(len(r.Responses)); err != nil {
 		return err
 	}
@@ -51,15 +51,19 @@ func (r *ProduceResponses) Encode(e PacketEncoder) (err error) {
 	return nil
 }
 
-func (r *ProduceResponses) Decode(d PacketDecoder, version int16) (err error) {
+type ProduceTopicResponses []*ProduceTopicResponse
+
+type ProducePartitionResponses []*ProducePartitionResponse
+
+func (r *ProduceResponse) Decode(d PacketDecoder, version int16) (err error) {
 	r.APIVersion = version
 	l, err := d.ArrayLength()
 	if err != nil {
 		return err
 	}
-	r.Responses = make([]*ProduceResponse, l)
+	r.Responses = make([]*ProduceTopicResponse, l)
 	for i := range r.Responses {
-		resp := new(ProduceResponse)
+		resp := new(ProduceTopicResponse)
 		r.Responses[i] = resp
 		resp.Topic, err = d.String()
 		if err != nil {

@@ -9,7 +9,7 @@ type Broker struct {
 
 type PartitionMetadata struct {
 	PartitionErrorCode int16
-	ParititionID       int32
+	PartitionID        int32
 	Leader             int32
 	Replicas           []int32
 	ISR                []int32
@@ -56,7 +56,7 @@ func (r *MetadataResponse) Encode(e PacketEncoder) (err error) {
 		}
 		for _, p := range t.PartitionMetadata {
 			e.PutInt16(p.PartitionErrorCode)
-			e.PutInt32(p.ParititionID)
+			e.PutInt32(p.PartitionID)
 			e.PutInt32(p.Leader)
 			if err = e.PutInt32Array(p.Replicas); err != nil {
 				return err
@@ -128,7 +128,7 @@ func (r *MetadataResponse) Decode(d PacketDecoder, version int16) (err error) {
 			if err != nil {
 				return err
 			}
-			p.ParititionID, err = d.Int32()
+			p.PartitionID, err = d.Int32()
 			if err != nil {
 				return err
 			}
@@ -152,3 +152,9 @@ func (r *MetadataResponse) Decode(d PacketDecoder, version int16) (err error) {
 func (r *MetadataResponse) Version() int16 {
 	return r.APIVersion
 }
+
+type Brokers []*Broker
+
+type TopicMetadatas []*TopicMetadata
+
+type PartitionMetadatas []*PartitionMetadata

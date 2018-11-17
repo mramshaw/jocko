@@ -136,3 +136,9 @@ func (r *LeaderAndISRRequest) Key() int16 {
 func (r *LeaderAndISRRequest) Version() int16 {
 	return r.APIVersion
 }
+
+type LiveLeaders []*LiveLeader
+
+type PartitionStates []*PartitionState
+
+type Int32s []int32

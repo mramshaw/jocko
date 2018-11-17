@@ -6,11 +6,10 @@ import (
 
 	stdopentracing "github.com/opentracing/opentracing-go"
 	"github.com/travisjeffery/jocko/jocko/structs"
-	"github.com/travisjeffery/jocko/log"
 )
 
 func testStore(t *testing.T) *Store {
-	s, err := NewStore(log.New(), stdopentracing.GlobalTracer())
+	s, err := NewStore(stdopentracing.GlobalTracer())
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
@@ -108,7 +107,7 @@ func TestStore_RegisterTopic(t *testing.T) {
 
 	testRegisterTopic(t, s, 0, "topic1")
 
-	if idx, topics, err := s.GetTopics(); err != nil || idx != 0 || !reflect.DeepEqual(topics, []*structs.Topic{{Topic: "topic1"}}) {
+	if idx, topics, err := s.GetTopics(); err != nil || idx != 0 || !reflect.DeepEqual(topics, []*structs.Topic{{Topic: "topic1", Config: structs.NewTopicConfig()}}) {
 		t.Fatalf("err: %s", err)
 	}
 

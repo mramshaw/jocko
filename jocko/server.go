@@ -11,7 +11,6 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/travisjeffery/jocko/jocko/config"
-	"github.com/travisjeffery/jocko/jocko/util"
 	"github.com/travisjeffery/jocko/log"
 	"github.com/travisjeffery/jocko/protocol"
 )
@@ -34,47 +33,45 @@ func init() {
 }
 
 // Broker is the interface that wraps the Broker's methods.
-type broker interface {
-	Run(context.Context, <-chan Request, chan<- Response)
+type Handler interface {
+	Run(context.Context, <-chan *Context, chan<- *Context)
+	Leave() error
 	Shutdown() error
 }
 
 // Server is used to handle the TCP connections, decode requests,
 // defer to the broker, and encode the responses.
 type Server struct {
-	config       *config.ServerConfig
+	config       *config.Config
 	protocolLn   *net.TCPListener
-	logger       log.Logger
-	broker       *Broker
+	handler      Handler
 	shutdown     bool
 	shutdownCh   chan struct{}
 	shutdownLock sync.Mutex
 	metrics      *Metrics
-	requestCh    chan Request
-	responseCh   chan Response
+	requestCh    chan *Context
+	responseCh   chan *Context
 	tracer       opentracing.Tracer
 	close        func() error
 }
 
-func NewServer(config *config.ServerConfig, broker *Broker, metrics *Metrics, tracer opentracing.Tracer, close func() error, logger log.Logger) *Server {
+func NewServer(config *config.Config, handler Handler, metrics *Metrics, tracer opentracing.Tracer, close func() error) *Server {
 	s := &Server{
 		config:     config,
-		broker:     broker,
-		logger:     logger.With(log.Int32("node id", broker.config.ID), log.String("addr", broker.config.Addr)),
+		handler:    handler,
 		metrics:    metrics,
 		shutdownCh: make(chan struct{}),
-		requestCh:  make(chan Request, 32),
-		responseCh: make(chan Response, 32),
+		requestCh:  make(chan *Context, 1024),
+		responseCh: make(chan *Context, 1024),
 		tracer:     tracer,
 		close:      close,
 	}
-	s.logger.Info("hello")
 	return s
 }
 
 // Start starts the service.
 func (s *Server) Start(ctx context.Context) error {
-	protocolAddr, err := net.ResolveTCPAddr("tcp", s.config.BrokerAddr)
+	protocolAddr, err := net.ResolveTCPAddr("tcp", s.config.Addr)
 	if err != nil {
 		return err
 	}
@@ -92,7 +89,7 @@ func (s *Server) Start(ctx context.Context) error {
 			default:
 				conn, err := s.protocolLn.Accept()
 				if err != nil {
-					s.logger.Error("listener accept failed", log.Error("error", err))
+					log.Error.Printf("server/%d: listener accept error: %s", s.config.ID, err)
 					continue
 				}
 
@@ -108,51 +105,62 @@ func (s *Server) Start(ctx context.Context) error {
 				break
 			case <-s.shutdownCh:
 				break
-			case resp := <-s.responseCh:
-				if queueSpan, ok := resp.Ctx.Value(responseQueueSpanKey).(opentracing.Span); ok {
+			case respCtx := <-s.responseCh:
+				if queueSpan, ok := respCtx.Value(responseQueueSpanKey).(opentracing.Span); ok {
 					queueSpan.Finish()
 				}
-				if err := s.handleResponse(resp); err != nil {
-					s.logger.Error("failed to write response", log.Error("error", err))
+				if err := s.handleResponse(respCtx); err != nil {
+					log.Error.Printf("server/%d: handle response error: %s", s.config.ID, err)
 				}
 			}
 		}
 	}()
 
-	go s.broker.Run(ctx, s.requestCh, s.responseCh)
+	log.Debug.Printf("server/%d: run handler", s.config.ID)
+	go s.handler.Run(ctx, s.requestCh, s.responseCh)
 
 	return nil
 }
 
+func (s *Server) Leave() error {
+	return s.handler.Leave()
+}
+
 // Shutdown closes the service.
-func (s *Server) Shutdown() {
+func (s *Server) Shutdown() error {
 	s.shutdownLock.Lock()
 	defer s.shutdownLock.Unlock()
 
 	if s.shutdown {
-		return
+		return nil
 	}
 
 	s.shutdown = true
 	close(s.shutdownCh)
 
-	s.broker.Shutdown()
-	s.protocolLn.Close()
+	if err := s.handler.Shutdown(); err != nil {
+		return err
+	}
+	if err := s.protocolLn.Close(); err != nil {
+		return err
+	}
 
 	s.close()
+
+	return nil
 }
 
 func (s *Server) handleRequest(conn net.Conn) {
 	defer conn.Close()
 
-	p := make([]byte, 4)
 	for {
+		p := make([]byte, 4)
 		_, err := io.ReadFull(conn, p[:])
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			s.logger.Error("conn read failed", log.Error("error", err))
+			log.Error.Printf("conn read error: %s", err)
 			break
 		}
 
@@ -187,8 +195,8 @@ func (s *Server) handleRequest(conn net.Conn) {
 		span.SetTag("correlation_id", header.CorrelationID)
 		span.SetTag("client_id", header.ClientID)
 		span.SetTag("size", size)
-		span.SetTag("node_id", s.broker.config.ID) // can I set this globally for the tracer?
-		span.SetTag("addr", s.broker.config.Addr)
+		span.SetTag("node_id", s.config.ID) // can I set this globally for the tracer?
+		span.SetTag("addr", s.config.Addr)
 
 		var req protocol.VersionedDecoder
 
@@ -238,7 +246,7 @@ func (s *Server) handleRequest(conn net.Conn) {
 		}
 
 		if err := req.Decode(d, header.APIVersion); err != nil {
-			s.logger.Error("failed to decode request", log.Error("err", err), log.Any("header", header))
+			log.Error.Printf("server/%d: %s: decode request failed: %s", s.config.ID, header, err)
 			span.LogKV("msg", "failed to decode request", "err", err)
 			span.Finish()
 			panic(err)
@@ -246,33 +254,37 @@ func (s *Server) handleRequest(conn net.Conn) {
 
 		decodeSpan.Finish()
 
-		s.vlog(span, "request", req)
-
 		ctx := opentracing.ContextWithSpan(context.Background(), span)
-
 		queueSpan := s.tracer.StartSpan("server: queue request", opentracing.ChildOf(span.Context()))
 		ctx = context.WithValue(ctx, requestQueueSpanKey, queueSpan)
 
-		s.requestCh <- Request{
-			Ctx:     ctx,
-			Header:  header,
-			Request: req,
-			Conn:    conn,
+		reqCtx := &Context{
+			parent: ctx,
+			header: header,
+			req:    req,
+			conn:   conn,
 		}
+
+		log.Debug.Printf("server/%d: handle request: %s", s.config.ID, reqCtx)
+
+		s.requestCh <- reqCtx
 	}
 }
 
-func (s *Server) handleResponse(resp Response) error {
-	psp := opentracing.SpanFromContext(resp.Ctx)
+func (s *Server) handleResponse(respCtx *Context) error {
+	psp := opentracing.SpanFromContext(respCtx)
 	sp := s.tracer.StartSpan("server: handle response", opentracing.ChildOf(psp.Context()))
-	s.vlog(sp, "response", resp.Response)
+
+	log.Debug.Printf("server/%d: handle response: %s", s.config.ID, respCtx)
+
 	defer psp.Finish()
 	defer sp.Finish()
-	b, err := protocol.Encode(resp.Response.(protocol.Encoder))
+
+	b, err := protocol.Encode(respCtx.res.(protocol.Encoder))
 	if err != nil {
 		return err
 	}
-	_, err = resp.Conn.Write(b)
+	_, err = respCtx.conn.Write(b)
 	return err
 }
 
@@ -282,11 +294,5 @@ func (s *Server) Addr() net.Addr {
 }
 
 func (s *Server) ID() int32 {
-	return s.broker.config.ID
-}
-
-func (s *Server) vlog(span opentracing.Span, k string, i interface{}) {
-	if serverVerboseLogs {
-		span.LogKV(k, util.Dump(i))
-	}
+	return s.config.ID
 }

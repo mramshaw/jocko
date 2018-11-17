@@ -107,3 +107,7 @@ func (r *ProduceRequest) Key() int16 {
 func (r *ProduceRequest) Version() int16 {
 	return r.APIVersion
 }
+
+type TopicDatas []*TopicData
+
+type Datas []*Data
